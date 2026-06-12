@@ -4,10 +4,8 @@ indicator("Market Confluence Layer (MCL)", overlay=true, max_lines_count=300, ma
 // ==============================
 // CONSTANTS
 // ==============================
-const int   FVG_CAP = 60
 const int   MAX_FRACTALS_PERF_MODE = 80
 const int   MAX_FRACTALS_NORMAL    = 140
-const int   MAX_CONFLUENCE_ITEMS   = 60
 const int   AMP_PERIOD_C1 = 60
 const int   AMP_PERIOD_C2 = 120
 const int   AMP_PERIOD_C3 = 240
@@ -36,9 +34,6 @@ denseMode = input.bool(false, "Dense mode", group=grp_ui)
 
 grp_perf = "Performance"
 perfMode = input.bool(false, "Performance mode", group=grp_perf)
-perfThrottle = input.int(1, "Perf throttle (bars)", minval=1, maxval=10, group=grp_perf)
-uiThrottle   = input.int(1, "UI throttle (bars)", minval=1, maxval=20, group=grp_perf)
-calcThrottle = input.int(1, "Calc throttle (bars)", minval=1, maxval=20, group=grp_perf)
 
 grp_reg = "Regime"
 qLowPct  = input.int(35, "VolRatio low pct",  minval=5,  maxval=45, group=grp_reg)
@@ -48,7 +43,7 @@ qLen     = input.int(500,"Percentile window", minval=200,maxval=5000, group=grp_
 grp_fvg = "FVG"
 fvgMinPct     = input.float(0.30, "Min gap %", minval=0.05, step=0.05, group=grp_fvg)
 fvgExtendBars = input.int(25,     "Extend (bars)", minval=5, step=5, group=grp_fvg)
-fvgFillMode   = input.string("Wick", "FVG fill mode", options=["Wick","BodyTouch","BodyFull"], group=grp_fvg)
+fvgFillMode   = input.string("Wick", "FVG fill mode", options=["Wick","BodyTouch","BodyFull"], group=grp_fvg, tooltip="Wick: any wick entering the gap removes it. BodyTouch: candle body must overlap the gap. BodyFull: body must cover the whole gap.")
 fvgBullColor  = input.color(color.new(#26a69a, 90), "Bullish color", group=grp_fvg)
 fvgBearColor  = input.color(color.new(#ef5350, 90), "Bearish color", group=grp_fvg)
 fvgCapDyn     = input.int(60, "FVG cap (runtime)", minval=10, maxval=200, group=grp_fvg)
@@ -67,6 +62,7 @@ dojiTrMinPctATR  = input.float(0.30, "TR fallback min vs ATR", minval=0.05, step
 
 grp_conf = "Confluence"
 fibStr        = input.string("0.236,0.382,0.5,0.618,0.786,1.0,1.272,1.618,2.0,2.618,4.236", "Fib ratios", group=grp_conf)
+confAnchor    = input.string("Swing", "Level anchor", options=["Swing","Close"], group=grp_conf, tooltip="Swing: fib levels anchored to last pivot high/low (stable levels). Close: levels projected from current close (drift with price).")
 confTolPct    = input.float(0.35, "Tolerance %", minval=0.05, step=0.05, group=grp_conf)
 useDynWindow  = input.bool(false,  "Use ATR-based window", group=grp_conf)
 nearWindowFix = input.float(8.0,  "Fixed window %", minval=0.5, step=0.5, group=grp_conf)
@@ -99,7 +95,7 @@ energyColor   = input.color(color.new(#9333ea, 88), "Zone color", group=grp_ener
 
 grp_check = "Checklist"
 checkLookback    = input.int(300, "Liquidity lookback (bars)", minval=1, maxval=500, group=grp_check)
-checkMinConf     = input.int(0,  "Min confluence per side",   minval=0, maxval=5, group=grp_check)
+checkMinConf     = input.int(1,  "Min confluence per side",   minval=0, maxval=5, group=grp_check)
 checkSide        = input.string("Auto", "Trade side", options=["Auto","Long","Short"], group=grp_check)
 biasEdge         = input.float(0.5, "Bias edge (levels)", minval=0, group=grp_check)
 
@@ -111,7 +107,7 @@ parseFibs(_s) =>
     array<float> out = array.new<float>()
     for p in parts
         v = str.tonumber(p)
-        if not na(v)
+        if not na(v) and v > 0
             array.push(out, v)
     out
 
@@ -143,11 +139,11 @@ isFilled(float top, float bot) =>
     bodyBot = math.min(open, close)
     bool result = false
     if fvgFillMode == "Wick"
-        result := (low <= bot and high >= top)
+        result := high > bot and low < top
     else if fvgFillMode == "BodyTouch"
-        result := (bodyTop >= bot and bodyBot <= top)
+        result := bodyTop > bot and bodyBot < top
     else
-        result := (bodyTop >= top and bodyBot <= bot)
+        result := bodyTop >= top and bodyBot <= bot
     result
 
 priceSrc = ampLog ? math.log(close) : close
@@ -191,8 +187,6 @@ var line eDn = na
 var linefill eFill = na
 
 var table ui = na
-
-var label dbg = na
 
 // ==============================
 // FVG synced arrays
@@ -240,6 +234,10 @@ lowest200 = ta.lowest(low, 200)
 
 qLow  = ta.percentile_linear_interpolation(volRatio, qLen, qLowPct)
 qHigh = ta.percentile_linear_interpolation(volRatio, qLen, qHighPct)
+
+atrPct        = atr14 / math.max(MIN_TICK_PROTECTION, close) * 100.0
+confTolEff    = autoConfTol ? math.max(confTolPct, confBeta * atrPct) : confTolPct
+nearWindowPct = useDynWindow ? math.min(nearDynMaxPct, nearDynMult * atrPct) : nearWindowFix
 
 isCompression = volRatio < qLow
 isExpansion   = volRatio > qHigh
@@ -315,7 +313,7 @@ if enableFVG and barstate.isconfirmed
                 bot = math.min(tp, bt)
                 if isFilled(top, bot)
                     fvg_remove_at(i)
-    
+
     szF3 = array.size(fvgBoxes)
     if szF3 > 0
         for n = 0 to szF3 - 1
@@ -334,7 +332,7 @@ if enableFractal
         array.push(fractals, phVal)
     if not na(plVal)
         array.push(fractals, plVal)
-    
+
     if bar_index % 10 == 0
         if not na(highest50) and f_far(fractals, highest50)
             array.push(fractals, highest50)
@@ -344,7 +342,7 @@ if enableFractal
             array.push(fractals, highest200)
         if not na(lowest200) and f_far(fractals, lowest200)
             array.push(fractals, lowest200)
-    
+
     while array.size(fractals) > (perfMode ? MAX_FRACTALS_PERF_MODE : MAX_FRACTALS_NORMAL)
         array.shift(fractals)
 
@@ -352,59 +350,40 @@ if enableFractal
 // CONFLUENCE CALCULATION
 // ==============================
 var float[] upL_global = array.new_float()
-var float[] upS_global = array.new_float() 
+var float[] upS_global = array.new_float()
 var string[] upT_global = array.new_string()
 var float[] dnL_global = array.new_float()
 var float[] dnS_global = array.new_float()
 var string[] dnT_global = array.new_string()
+var float[] seenLvls = array.new_float()
 
+scoreOne(float testLevel, float ref) =>
+    float s = 0.0
+    if not na(ref) and ref != 0
+        dist = math.abs(testLevel - ref) / math.max(MIN_TICK_PROTECTION, math.abs(ref)) * 100.0
+        if dist <= confTolEff
+            s := 1.0 - dist / confTolEff
+    s
+
+// Scans the FULL fractal pool and ALL active FVG levels; multiple agreeing
+// sources grant a bonus so genuine confluence outranks single touches.
 calcScore(float testLevel) =>
     float best = 0.0
-    
+    int hits = 0
     if array.size(fractals) > 0
-        if array.size(fractals) >= 1
-            fp1 = array.get(fractals, 0)
-            if not na(fp1) and fp1 != 0
-                dist = math.abs(testLevel - fp1) / math.max(MIN_TICK_PROTECTION, math.abs(fp1)) * 100.0
-                if dist <= confTolPct
-                    best := math.max(best, 1.0 - dist / confTolPct)
-        
-        if array.size(fractals) >= 2
-            fp2 = array.get(fractals, 1)
-            if not na(fp2) and fp2 != 0
-                dist = math.abs(testLevel - fp2) / math.max(MIN_TICK_PROTECTION, math.abs(fp2)) * 100.0
-                if dist <= confTolPct
-                    best := math.max(best, 1.0 - dist / confTolPct)
-        
-        if array.size(fractals) >= 3
-            fp3 = array.get(fractals, 2)
-            if not na(fp3) and fp3 != 0
-                dist = math.abs(testLevel - fp3) / math.max(MIN_TICK_PROTECTION, math.abs(fp3)) * 100.0
-                if dist <= confTolPct
-                    best := math.max(best, 1.0 - dist / confTolPct)
-    
-    if array.size(fvgTop) > 0
-        tp = array.get(fvgTop, 0)
-        if not na(tp)
-            dist1 = math.abs(testLevel - tp) / math.max(MIN_TICK_PROTECTION, math.abs(tp)) * 100.0
-            if dist1 <= confTolPct
-                best := math.max(best, 1.0 - dist1 / confTolPct)
-    
-    if array.size(fvgBot) > 0
-        bt = array.get(fvgBot, 0)
-        if not na(bt)
-            dist2 = math.abs(testLevel - bt) / math.max(MIN_TICK_PROTECTION, math.abs(bt)) * 100.0
-            if dist2 <= confTolPct
-                best := math.max(best, 1.0 - dist2 / confTolPct)
-    
-    if array.size(fvgMids) > 0
-        md = array.get(fvgMids, 0)
-        if not na(md)
-            dist3 = math.abs(testLevel - md) / math.max(MIN_TICK_PROTECTION, math.abs(md)) * 100.0
-            if dist3 <= confTolPct
-                best := math.max(best, 1.0 - dist3 / confTolPct)
-    
-    best
+        for f in fractals
+            s = scoreOne(testLevel, f)
+            if s > 0
+                best := math.max(best, s)
+                hits += 1
+    int szG = array.size(fvgMids)
+    if szG > 0
+        for i = 0 to szG - 1
+            sG = math.max(scoreOne(testLevel, array.get(fvgTop, i)), math.max(scoreOne(testLevel, array.get(fvgBot, i)), scoreOne(testLevel, array.get(fvgMids, i))))
+            if sG > 0
+                best := math.max(best, sG)
+                hits += 1
+    hits > 1 ? math.min(1.0, best + 0.1 * math.min(hits - 1, 3)) : best
 
 scoreColor(float s, bool upside) =>
     color base = upside ? color.yellow : color.orange
@@ -430,84 +409,70 @@ clearConfluence() =>
     array.clear(confLines)
     array.clear(confLabels)
 
-if enableFractal and (barstate.islast or (bar_index % math.max(5, calcThrottle) == 0))
+addCandidate(float level, string tag) =>
+    distPct = math.abs(level - close) / math.max(MIN_TICK_PROTECTION, close) * 100.0
+    if distPct <= nearWindowPct and f_far(seenLvls, level)
+        s = calcScore(level)
+        if s >= minScore
+            array.push(seenLvls, level)
+            if level >= close
+                array.push(upL_global, level)
+                array.push(upS_global, s)
+                array.push(upT_global, tag)
+            else
+                array.push(dnL_global, level)
+                array.push(dnS_global, s)
+                array.push(dnT_global, tag)
+
+drawSide(array<float> lvls, array<float> scores, array<string> tags, bool upside, int maxN) =>
+    int n = array.size(lvls)
+    if n > 0
+        int[] idxOrder = array.sort_indices(scores, order.descending)
+        int drawCount = math.min(maxN, n)
+        for k = 0 to drawCount - 1
+            i = array.get(idxOrder, k)
+            level = array.get(lvls, i)
+            score = array.get(scores, i)
+            tag = array.get(tags, i)
+            lineColor = scoreColor(score, upside)
+            lineWidth = score >= 0.7 ? 2 : 1
+            confLine = line.new(bar_index, level, bar_index + CONFLUENCE_BAR_OFFSET, level, color=lineColor, width=lineWidth, style=line.style_dotted, extend=extend.right)
+            confLabel = label.new(bar_index + CONFLUENCE_LABEL_OFFSET, level, tag + " · " + str.tostring(score, "0.00"), color=color.new(lineColor, 70), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+            array.push(confLines, confLine)
+            array.push(confLabels, confLabel)
+
+if not enableFractal and barstate.islast and array.size(confLines) > 0
     clearConfluence()
-    
+
+if enableFractal and barstate.islast
+    clearConfluence()
     array.clear(upL_global)
     array.clear(upS_global)
     array.clear(upT_global)
     array.clear(dnL_global)
     array.clear(dnS_global)
     array.clear(dnT_global)
-    
+    array.clear(seenLvls)
+
     float baseRange = math.max(atr14 * 6, (highest200 - lowest200) * 0.4)
-    float maxDistancePct = 20.0
-    
+    bool  swingOK   = confAnchor == "Swing" and pivotPHFresh and pivotPLFresh and lastPH > lastPL
+    float swRange   = swingOK ? lastPH - lastPL : 0.0
+
     for fib in FIBS
-        upLevel = close + fib * baseRange
-        upDistance = math.abs(upLevel - close) / math.max(MIN_TICK_PROTECTION, close) * 100.0
-        
-        if upDistance <= maxDistancePct
-            upScore = calcScore(upLevel)
-            if upScore >= minScore
-                array.push(upL_global, upLevel)
-                array.push(upS_global, upScore)
-                array.push(upT_global, str.tostring(fib, "#.###"))
-        
-        dnLevel = close - fib * baseRange
-        dnDistance = math.abs(dnLevel - close) / math.max(MIN_TICK_PROTECTION, close) * 100.0
-        
-        if dnDistance <= maxDistancePct
-            dnScore = calcScore(dnLevel)
-            if dnScore >= minScore
-                array.push(dnL_global, dnLevel)
-                array.push(dnS_global, dnScore)
-                array.push(dnT_global, str.tostring(fib, "#.###"))
-    
+        string tag = str.tostring(fib, "#.###")
+        if swingOK
+            addCandidate(lastPL + fib * swRange, tag)
+            addCandidate(lastPH - fib * swRange, tag)
+        else
+            addCandidate(close + fib * baseRange, tag)
+            addCandidate(close - fib * baseRange, tag)
+
     upCount := array.size(upL_global)
     dnCount := array.size(dnL_global)
-    
+
     int maxDrawLevels = math.min(fracMaxLevels, confBudgetPerSide)
-        
-    if array.size(upL_global) > 0
-        int upLevels = array.size(upL_global)
-        int drawCount = math.min(maxDrawLevels, upLevels)
-        
-        for i = 0 to drawCount - 1
-            if i < array.size(upL_global) and i < array.size(upS_global) and i < array.size(upT_global)
-                level = array.get(upL_global, i)
-                score = array.get(upS_global, i)
-                tag = array.get(upT_global, i)
-                
-                lineColor = scoreColor(score, true)
-                lineWidth = score >= 0.7 ? 2 : 1
-                confLine = line.new(bar_index, level, bar_index + CONFLUENCE_BAR_OFFSET, level, color=lineColor, width=lineWidth, style=line.style_dotted, extend=extend.right)
-                
-                labelText = tag
-                confLabel = label.new(bar_index + CONFLUENCE_LABEL_OFFSET, level, labelText, color=color.new(lineColor, 70), textcolor=color.white, style=label.style_label_left, size=size.tiny)
-                
-                array.push(confLines, confLine)
-                array.push(confLabels, confLabel)
-        
-    if array.size(dnL_global) > 0
-        int dnLevels = array.size(dnL_global)
-        int drawCount = math.min(maxDrawLevels, dnLevels)
-        
-        for i = 0 to drawCount - 1
-            if i < array.size(dnL_global) and i < array.size(dnS_global) and i < array.size(dnT_global)
-                level = array.get(dnL_global, i)
-                score = array.get(dnS_global, i)
-                tag = array.get(dnT_global, i)
-                
-                lineColor = scoreColor(score, false)
-                lineWidth = score >= 0.7 ? 2 : 1
-                confLine = line.new(bar_index, level, bar_index + CONFLUENCE_BAR_OFFSET, level, color=lineColor, width=lineWidth, style=line.style_dotted, extend=extend.right)
-                
-                labelText = tag
-                confLabel = label.new(bar_index + CONFLUENCE_LABEL_OFFSET, level, labelText, color=color.new(lineColor, 70), textcolor=color.white, style=label.style_label_left, size=size.tiny)
-                
-                array.push(confLines, confLine)
-                array.push(confLabels, confLabel)
+    drawSide(upL_global, upS_global, upT_global, true,  maxDrawLevels)
+    drawSide(dnL_global, dnS_global, dnT_global, false, maxDrawLevels)
 
 // ==============================
 // AMP
@@ -520,21 +485,26 @@ if enableFractal and (barstate.islast or (bar_index % math.max(5, calcThrottle) 
 float signSum = math.sign(s1) + math.sign(s2) + math.sign(s3) + math.sign(s4)
 bool signConsistent = math.abs(signSum) >= 2
 
+// Mid periods (120/240) are preferred when they meet minR; otherwise the best
+// R among all candidates wins. The old logic could never select 60 or 300.
 int pick = ampPeriodManual
 if ampAuto and signConsistent
     float[] rArr = array.from(r1, r2, r3, r4)
-    int[]    pArr= array.from(AMP_PERIOD_C1, AMP_PERIOD_C2, AMP_PERIOD_C3, AMP_PERIOD_C4)
-    int bestI = 1
-    float bestR = array.get(rArr, bestI)
-    for i = 0 to 3
-        rr = array.get(rArr, i)
-        pp = array.get(pArr, i)
-        bool prefer = (pp == AMP_PERIOD_C2 or pp == AMP_PERIOD_C3) and rr >= minR
-        bool upgrade = (prefer and rr > bestR) or ((array.get(pArr, bestI) != AMP_PERIOD_C2 and array.get(pArr, bestI) != AMP_PERIOD_C3) and rr > bestR)
-        if upgrade
+    int[]   pArr = array.from(AMP_PERIOD_C1, AMP_PERIOD_C2, AMP_PERIOD_C3, AMP_PERIOD_C4)
+    int   bestI = -1
+    float bestR = minR
+    for i = 1 to 2
+        if array.get(rArr, i) >= bestR
+            bestR := array.get(rArr, i)
             bestI := i
-            bestR := rr
-    pick := bestR >= minR ? array.get(pArr, bestI) : ampPeriodManual
+    if bestI < 0
+        bestR := minR
+        for i = 0 to 3
+            if array.get(rArr, i) >= bestR
+                bestR := array.get(rArr, i)
+                bestI := i
+    if bestI >= 0
+        pick := array.get(pArr, bestI)
 
 var int ampBestP = ampPeriodManual
 ampBestP := ampAuto ? pick : ampPeriodManual
@@ -571,7 +541,7 @@ float slopeThr_alt = useAutoFlat
      : slopeThrAmp
 float slopeThr = slopeThr_alt
 bool isFlat = math.abs(slopeB) < slopeThr
- 
+
 if not enableAMP and not na(ampU)
     line.delete(ampU), line.delete(ampM), line.delete(ampL)
     if not na(ampF1)
@@ -610,7 +580,7 @@ if not enableEnergy and not na(eUp)
         linefill.delete(eFill)
     eUp := na, eDn := na, eFill := na
 
-if enableEnergy
+if enableEnergy and barstate.islast
     if na(eUp)
         eUp := line.new(bar_index, upB, bar_index + energyHorizon, upB, color=color.new(color.purple, 50))
         eDn := line.new(bar_index, dnB, bar_index + energyHorizon, dnB, color=color.new(color.purple, 50))
@@ -626,7 +596,7 @@ if enableEnergy
 // ==============================
 float nearTol_px = atr14 * 0.75
 float midTol = atr14 * 0.25
- 
+
 bool trendUp_p    = slopeB >  +slopeThr
 bool trendDown_p  = slopeB <  -slopeThr
 bool nearLower_p  = not na(lRight) and math.abs(close - lRight) <= nearTol_px
@@ -669,18 +639,12 @@ bool allGreen_p = cTrend_p and cLoc_p and cConf_p and cLiq_p
 
 string regimeTxt = isCompression ? "COMPRESS" : isExpansion ? "EXPAND" : "ACTIVE"
 
-string biasTxt = upCount > dnCount ? "UP (up="+str.tostring(upCount)+", dn="+str.tostring(dnCount)+") [Confluence]"
-                  : dnCount > upCount ? "DOWN (up="+str.tostring(upCount)+", dn="+str.tostring(dnCount)+") [Confluence]"
-                  : "BALANCED (up="+str.tostring(upCount)+", dn="+str.tostring(dnCount)+") [Confluence]"
-
 string liqDirTxt = na(bSinceBull_p) and na(bSinceBear_p) ? "NONE" : na(bSinceBear_p) ? "BUY" : na(bSinceBull_p) ? "SELL" : (bSinceBull_p < bSinceBear_p ? "BUY" : "SELL")
 string liqWord   = liqAny_p ? "Recent ("+liqDirTxt+")" : "Neutral"
 
 mvPct = proj / math.max(MIN_TICK_PROTECTION, math.abs(close)) * 100.0
 string moveTxt = str.format("{0,number,#.#}%", mvPct)
-string ampTxt  = "P=" + str.tostring(ampBestP) + "  R=" + str.tostring(rB, "#.##")
 string slopeDir = math.abs(slopeB) < slopeThr ? "FLAT" : slopeB > 0 ? "UP" : "DOWN"
-string slopeTxt = slopeDir + " (" + str.format("±{0,number,0.###}×thr", math.abs(slopeB)/slopeThr) + ")"
 
 mkbar(float h) =>
     int seg = 8
@@ -692,32 +656,23 @@ mkbar(float h) =>
         else
             bar += "░"
     bar
-qLoShow = qLow, qHiShow = qHigh
-upDnTotal = math.max(1, upCount + dnCount)
 
 string trendNowTxt = trendUp_p ? "UP" : trendDown_p ? "DOWN" : "FLAT"
-string trendResTxt = cTrend_p ? "OK" : (sideSel_p=="Short" and trendUp_p) ? "Mismatch" : (sideSel_p=="Long" and trendDown_p) ? "Mismatch" : "X"
 
 bool useLong = sideSel_p == "Long"
 bool useShort= sideSel_p == "Short"
 string locNowTxt = useLong  ? (locLong_p  ? "LONG-ZONE"  : "NEUTRAL")
                  : useShort ? (locShort_p ? "SHORT-ZONE" : "NEUTRAL")
                  : "NEUTRAL"
-string locResTxt = cLoc_p ? "OK" : "X"
 
 string confNowTxt = useLong ? str.tostring(upCount) : useShort ? str.tostring(dnCount) : "0"
-string confResTxt = cConf_p ? "OK" : "X"
 
 string liqNowTxt  = liqAny_p ? "RECENT ("+liqDirTxt+")" : "NONE"
-string liqResTxt  = cLiq_p ? "OK" : "X"
-
-string sumTxt = allGreen_p ? (useLong ? "CONFIRM LONG" : useShort ? "CONFIRM SHORT" : "WAIT") : "WAIT"
 
 int approvalScore = (cTrend_p?25:0) + (cLoc_p?25:0) + (cConf_p?25:0) + (cLiq_p?25:0)
 string approvalStatus = approvalScore == 100 ? "FULL APPROVAL" : approvalScore >= 75 ? "HIGH APPROVAL" : approvalScore >= 50 ? "MEDIUM APPROVAL" : approvalScore >= 25 ? "LOW APPROVAL" : "NO APPROVAL"
 color approvalColor = approvalScore == 100 ? color.new(color.green, 0) : approvalScore >= 75 ? color.new(color.lime, 20) : approvalScore >= 50 ? color.new(color.yellow, 20) : approvalScore >= 25 ? color.new(color.orange, 20) : color.new(color.red, 20)
 
-float trendBarHeight = math.min(100, 100 * math.min(2.0, math.abs(slopeB) / slopeThr))
 float locBarHeight   = nearLower_p or nearUpper_p ? 100 : nearMid_p ? 30 : 60
 float confBarHeight  = math.min(100.0, (math.max(upCount, dnCount) / math.max(1.0, float(math.min(fracMaxLevels, confBudgetPerSide)))) * 100.0)
 int sinceAny = na(bSinceBull_p) and na(bSinceBear_p) ? na :
@@ -725,12 +680,11 @@ int sinceAny = na(bSinceBull_p) and na(bSinceBear_p) ? na :
                na(bSinceBear_p) ? bSinceBull_p :
                math.min(bSinceBull_p, bSinceBear_p)
 float liqBarHeight  = not na(sinceAny) and sinceAny <= checkLookback ? 100.0 * (checkLookback - sinceAny) / checkLookback : 0.0
-float overallScore  = approvalScore
 
 // ==============================
 // PANEL UI
 // ==============================
- 
+
 if not enablePanels and not na(ui) and barstate.islast
     table.clear(ui, 0, 0, 4, 13)
 
@@ -742,13 +696,10 @@ if enablePanels and barstate.islast
     color bgDark = color.new(#0a0a0a, 85)
     color bgCard = color.new(#1a1a1a, 80)
     color bgSuccess = color.new(#0d4f3c, 70)
-    color bgWarning = color.new(#4a3c0d, 70)
     color bgError = color.new(#4a0d0d, 70)
     color textPrimary = color.new(#ffffff, 0)
     color textSecondary = color.new(#b0b0b0, 0)
-    color textAccent = color.new(#4ade80, 0)
-    color borderAccent = color.new(#3b82f6, 60)
-    
+
     if panelMode == "Compact"
         string edgeText = str.format("{0}% {1}", approvalScore, approvalStatus)
         table.cell(ui, 0, 0, edgeText, text_color=textPrimary, text_halign=text.align_center, bgcolor=approvalColor, text_size=size.large)
@@ -780,33 +731,30 @@ if enablePanels and barstate.islast
         table.cell(ui, 0, 3, statsTextC, text_color=textSecondary, text_halign=text.align_center, bgcolor=bgDark, text_size=size.normal)
         table.merge_cells(ui, 0, 3, 4, 3)
     else
-         
+
         string headerText = str.format("{0}% {1}", approvalScore, approvalStatus)
         table.cell(ui, 0, 0, headerText, text_color=textPrimary, text_halign=text.align_center, bgcolor=approvalColor, text_size=size.large)
         table.merge_cells(ui, 0, 0, 4, 0)
 
-         
         string regimeCard = denseMode ? (isCompression ? "COMP" : isExpansion ? "EXP" : "ACT") : regimeTxt
         table.cell(ui, 0, 1, regimeCard, text_color=textPrimary, text_halign=text.align_center, bgcolor=bgCard, text_size=(denseMode ? size.small : size.normal))
-        
-        string moveCard = denseMode ? moveTxt : moveTxt
-        table.cell(ui, 1, 1, moveCard, text_color=textPrimary, text_halign=text.align_center, bgcolor=bgCard, text_size=(denseMode ? size.small : size.normal))
-        
-        string biasBase = upCount > dnCount ? (denseMode ? "BULL" : "BULL") : dnCount > upCount ? (denseMode ? "BEAR" : "BEAR") : (denseMode ? "NEUTRAL" : "NEUTRAL")
+
+        table.cell(ui, 1, 1, moveTxt, text_color=textPrimary, text_halign=text.align_center, bgcolor=bgCard, text_size=(denseMode ? size.small : size.normal))
+
+        string biasBase = upCount > dnCount ? "BULL" : dnCount > upCount ? "BEAR" : "NEUTRAL"
         string slopeArrowC = slopeDir == "UP" ? "↗" : slopeDir == "DOWN" ? "↘" : "→"
-        string biasCard = denseMode ? str.format("{0}{1} R² {2}", biasBase == "NEUTRAL" ? "NEU" : biasBase == "BULL" ? "BULL" : "BEAR", slopeArrowC, str.format("{0,number,0.##}", rB)) : str.format("{0} {1} · R² {2}", biasBase, slopeArrowC, str.format("{0,number,0.##}", rB))
+        string biasCard = denseMode ? str.format("{0}{1} R² {2}", biasBase == "NEUTRAL" ? "NEU" : biasBase, slopeArrowC, str.format("{0,number,0.##}", rB)) : str.format("{0} {1} · R² {2}", biasBase, slopeArrowC, str.format("{0,number,0.##}", rB))
         table.cell(ui, 2, 1, biasCard, text_color=textPrimary, text_halign=text.align_center, bgcolor=bgCard, text_size=(denseMode ? size.small : size.normal))
-        
+
         string pvCard = denseMode ? str.format("P{0} · V{1}", ampBestP, str.format("{0,number,0.##}", volRatio)) : str.format("P{0}", ampBestP)
         table.cell(ui, 3, 1, pvCard, text_color=textPrimary, text_halign=text.align_center, bgcolor=bgCard, text_size=(denseMode ? size.small : size.normal))
-        
+
         if not denseMode
             string volCard = str.format("Vol {0}", str.format("{0,number,0.##}", volRatio))
             table.cell(ui, 4, 1, volCard, text_color=textPrimary, text_halign=text.align_center, bgcolor=bgCard, text_size=size.normal)
-        
-         
-        bool aBullFvgCond = enableFVG and barstate.isconfirmed and not na(high[2]) and low > high[2] and ((low - high[2]) / math.max(high[2], 1e-6) * 100 >= fvgMinPct)
-        bool aBearFvgCond = enableFVG and barstate.isconfirmed and not na(low[2]) and high < low[2] and ((low[2] - high) / math.max(low[2], 1e-6) * 100 >= fvgMinPct)
+
+        bool aBullFvgCond = enableFVG and not na(high[2]) and low > high[2] and ((low - high[2]) / math.max(high[2], 1e-6) * 100 >= fvgMinPct)
+        bool aBearFvgCond = enableFVG and not na(low[2]) and high < low[2] and ((low[2] - high) / math.max(low[2], 1e-6) * 100 >= fvgMinPct)
         int alertsActive = (enableAlerts ? 1 : 0) * ((bullSweepRaw ? 1 : 0) + (bearSweepRaw ? 1 : 0) + (bullSweep ? 1 : 0) + (bearSweep ? 1 : 0) + (aBullFvgCond ? 1 : 0) + (aBearFvgCond ? 1 : 0) + ((volRatio < qLow) ? 1 : 0) + ((volRatio > qHigh) ? 1 : 0))
         int fvgCountNow = array.size(fvgBoxes)
 
@@ -819,8 +767,7 @@ if enablePanels and barstate.islast
             string trendInfo = str.format("Trend {0} {1}", slopeDir, str.format("{0,number,0.##}×", math.abs(slopeB)/slopeThr))
             table.cell(ui, 0, 2, trendInfo, text_color=textSecondary, text_halign=text.align_center, bgcolor=bgDark, text_size=size.normal)
 
-            string liqInfo = liqWord
-            table.cell(ui, 1, 2, liqInfo, text_color=textSecondary, text_halign=text.align_center, bgcolor=bgDark, text_size=size.normal)
+            table.cell(ui, 1, 2, liqWord, text_color=textSecondary, text_halign=text.align_center, bgcolor=bgDark, text_size=size.normal)
 
             string fvgInfo = str.format("FVG {0}", fvgCountNow)
             table.cell(ui, 2, 2, fvgInfo, text_color=textSecondary, text_halign=text.align_center, bgcolor=bgDark, text_size=size.normal)
@@ -831,8 +778,6 @@ if enablePanels and barstate.islast
             string energyInfo = str.format("E H{0}×{1}", energyHorizon, str.format("{0,number,0.#}", energyATRMult))
             table.cell(ui, 4, 2, energyInfo, text_color=textSecondary, text_halign=text.align_center, bgcolor=bgDark, text_size=size.normal)
 
-
-         
         string trendText = str.format("{0} Trend: {1}", cTrend_p ? "✓" : "✗", trendNowTxt)
         color trendBg = cTrend_p ? bgSuccess : bgError
         table.cell(ui, 0, 4, trendText, text_color=textPrimary, text_halign=text.align_left, bgcolor=trendBg, text_size=size.normal)
@@ -853,7 +798,6 @@ if enablePanels and barstate.islast
         table.cell(ui, 0, 7, liqText, text_color=textPrimary, text_halign=text.align_left, bgcolor=liqBg, text_size=size.normal)
         table.merge_cells(ui, 0, 7, 4, 7)
 
-          
         if denseMode
             string progressLine = str.format("Vol {0} | Loc {1} | Mom {2} | Liq {3}", mkbar(math.min(100, volRatio * 100)), mkbar(locBarHeight), mkbar(math.min(100, math.abs(slopeB) / slopeThr * 50)), mkbar(liqBarHeight))
             table.cell(ui, 0, 8, progressLine, text_color=textPrimary, text_halign=text.align_center, bgcolor=bgCard, text_size=size.small)
@@ -862,7 +806,7 @@ if enablePanels and barstate.islast
             string volatilityBar = str.format("Volatility: {0}", mkbar(math.min(100, volRatio * 100)))
             table.cell(ui, 0, 8, volatilityBar, text_color=textPrimary, text_halign=text.align_left, bgcolor=bgCard, text_size=size.normal)
             table.merge_cells(ui, 0, 8, 2, 8)
-            
+
             string locBar = str.format("Location: {0}", mkbar(locBarHeight))
             table.cell(ui, 3, 8, locBar, text_color=textPrimary, text_halign=text.align_left, bgcolor=bgCard, text_size=size.normal)
             table.merge_cells(ui, 3, 8, 4, 8)
@@ -870,22 +814,19 @@ if enablePanels and barstate.islast
             string momentumBar = str.format("Momentum: {0}", mkbar(math.min(100, math.abs(slopeB) / slopeThr * 50)))
             table.cell(ui, 0, 9, momentumBar, text_color=textPrimary, text_halign=text.align_left, bgcolor=bgCard, text_size=size.normal)
             table.merge_cells(ui, 0, 9, 2, 9)
-            
+
             string liqBar2 = str.format("Liquidity: {0}", mkbar(liqBarHeight))
             table.cell(ui, 3, 9, liqBar2, text_color=textPrimary, text_halign=text.align_left, bgcolor=bgCard, text_size=size.normal)
             table.merge_cells(ui, 3, 9, 4, 9)
 
-         
         string overallStatus = allGreen_p ? (useLong ? "LONG SIGNAL ACTIVE" : "SHORT SIGNAL ACTIVE") : "WAITING FOR SIGNAL"
         color overallBg = allGreen_p ? (useLong ? color.new(#26a69a, 60) : color.new(#ef5350, 60)) : color.new(#4a3c0d, 60)
         table.cell(ui, 0, 10, overallStatus, text_color=textPrimary, text_halign=text.align_center, bgcolor=overallBg, text_size=size.large)
         table.merge_cells(ui, 0, 10, 4, 10)
 
-         
         string statsText = str.format("R²: {0} | ATR: {1}", str.format("{0,number,0.##}", rB), str.format("{0,number,0.##}", atr14))
         table.cell(ui, 0, 12, statsText, text_color=textSecondary, text_halign=text.align_center, bgcolor=bgDark, text_size=size.normal)
         table.merge_cells(ui, 0, 12, 4, 12)
-
 
 // ==============================
 // GLOBAL FLAGS FOR ALERTS
